@@ -3,7 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -58,7 +58,7 @@ func TestCustomHeaders(t *testing.T) {
 		t.Error("Expected 200 status code, got", resp.Status)
 	}
 
-	msg, err := ioutil.ReadAll(resp.Body)
+	msg, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestViaHeaders(t *testing.T) {
 		t.Error("Expected 200 status code, got", resp.Status)
 	}
 
-	msg, err := ioutil.ReadAll(resp.Body)
+	msg, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)
 	}

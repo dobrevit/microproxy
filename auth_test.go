@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -192,7 +191,7 @@ func TestBasicAuth(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Error("Expected status 200 OK, got", resp.Status)
 	}
-	msg, err := ioutil.ReadAll(resp.Body)
+	msg, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +262,7 @@ func TestDigestAuth(t *testing.T) {
 		t.Error("Expected status 200 OK, got", resp.Status)
 	}
 
-	msg, err := ioutil.ReadAll(resp.Body)
+	msg, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -403,7 +402,7 @@ func TestIPBasedAccessAllowed(t *testing.T) {
 		t.Error("Expected 200 status code, got", resp.Status)
 	}
 
-	msg, err := ioutil.ReadAll(resp.Body)
+	msg, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)
 	}

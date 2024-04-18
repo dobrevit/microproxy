@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"regexp"
 	"strings"
@@ -33,7 +33,7 @@ func basicUnauthorized(req *http.Request, realm string) *http.Response {
 		ProtoMinor:    1,
 		Request:       req,
 		Header:        http.Header{ProxyAuthenticateHeader: []string{header}},
-		Body:          ioutil.NopCloser(bytes.NewBuffer(unauthorizedMsg)),
+		Body:          io.NopCloser(bytes.NewBuffer(unauthorizedMsg)),
 		ContentLength: int64(len(unauthorizedMsg)),
 	}
 }
@@ -49,7 +49,7 @@ func digestUnauthorized(req *http.Request, realm string, authFunc DigestAuthFunc
 		ProtoMinor:    1,
 		Request:       req,
 		Header:        http.Header{ProxyAuthenticateHeader: []string{header}},
-		Body:          ioutil.NopCloser(bytes.NewBuffer(unauthorizedMsg)),
+		Body:          io.NopCloser(bytes.NewBuffer(unauthorizedMsg)),
 		ContentLength: int64(len(unauthorizedMsg)),
 	}
 }

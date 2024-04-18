@@ -1,0 +1,10 @@
+version: "3.6"
+
+services:
+  microproxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: microproxy:latest
+    volumes:
+      - ./microproxy-docker.toml:/usr/local/etc/microproxy.toml

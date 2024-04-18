@@ -6,3 +6,4 @@ microproxy
 bin/
 *.toml
 !microproxy.toml
+!microproxy-docker.toml
