@@ -3,3 +3,5 @@
 .git/
 !microproxy.toml
 microproxy
+.github/
+docker-compose.yml
