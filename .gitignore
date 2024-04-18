@@ -2,4 +2,7 @@ microproxy
 .tags*
 *.sublime*
 *.swp
+*.log
 bin/
+*.toml
+!microproxy.toml
