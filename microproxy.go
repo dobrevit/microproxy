@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"flag"
 	"fmt"
@@ -430,7 +431,11 @@ func setForwardProxy(conf *Configuration, proxy *goproxy.ProxyHttpServer) {
 		connectHandler := func(req *http.Request) {
 			req.Header.Del(ProxyAuthorizatonHeader)
 			if len(u.User.Username()) > 0 {
-				req.Header.Set(ProxyAuthorizatonHeader, "Basic "+base64.StdEncoding.EncodeToString([]byte(u.User.String())))
+				creds, err := url.QueryUnescape(u.User.String())
+				if err != nil {
+					proxy.Logger.Printf("can't decode the user credentials: %v", err)
+				}
+				req.Header.Set(ProxyAuthorizatonHeader, "Basic "+base64.StdEncoding.EncodeToString([]byte(creds)))
 			}
 		}
 		proxy.ConnectDial = proxy.NewConnectDialToProxyWithHandler(conf.ForwardProxyURL, connectHandler)
@@ -441,6 +446,7 @@ func setForwardProxy(conf *Configuration, proxy *goproxy.ProxyHttpServer) {
 
 func main() {
 	configFile := flag.String("config", "microproxy.toml", "proxy configuration file")
+	proxyInsecure := flag.Bool("i", false, "allow insecure forward proxy connections")
 	testConfigOnly := flag.Bool("t", false, "only test configuration file")
 	verboseMode := flag.Bool("v", false, "enable verbose debug mode")
 
@@ -470,6 +476,10 @@ func main() {
 	// To be called first while processing handlers' stack,
 	// has to be placed last in the source code.
 	setAuthenticationHandler(conf, proxy, logger)
+
+	proxy.Tr.TLSClientConfig = &tls.Config{
+		InsecureSkipVerify: *proxyInsecure,
+	}
 
 	proxy.Logger.Printf("starting proxy\n")
 
