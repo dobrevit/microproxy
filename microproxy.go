@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -42,6 +43,8 @@ const (
 )
 
 const tcpKeepAliveInterval = 1 * time.Minute
+
+type ConnectDialFunc func(network string, addr string) (net.Conn, error)
 
 type basicAuthRequest struct {
 	data        *BasicAuthData
@@ -292,25 +295,28 @@ func makeCustomDialContext(localAddr *net.TCPAddr) func(context.Context, string,
 	}
 }
 
+func checkBindAddressOK(conf *Configuration) (bool, string, error) {
+	if conf.BindIP != "" {
+		if ip := net.ParseIP(conf.BindIP); ip != nil {
+			if ip4 := ip.To4(); ip4 != nil {
+				return true, conf.BindIP + ":0", nil
+			} else if ip16 := ip.To16(); ip16 != nil {
+				return true, "[" + conf.BindIP + "]:0", nil
+			} else {
+				return false, "", fmt.Errorf("couldn't use \"%v\" as outgoing request address", conf.BindIP)
+			}
+		}
+	}
+	return false, "", nil
+}
+
 func createProxy(conf *Configuration) *goproxy.ProxyHttpServer {
 	proxy := goproxy.NewProxyHttpServer()
 	setActivityLog(conf, proxy)
 
-	var laddr string
-
-	addressOk := true
-
-	if conf.BindIP != "" {
-		if ip := net.ParseIP(conf.BindIP); ip != nil {
-			if ip4 := ip.To4(); ip4 != nil {
-				laddr = conf.BindIP + ":0"
-			} else if ip16 := ip.To16(); ip16 != nil {
-				laddr = "[" + conf.BindIP + "]:0"
-			} else {
-				proxy.Logger.Printf("WARN: couldn't use \"%v\" as outgoing request address.\n", conf.BindIP)
-				addressOk = false
-			}
-		}
+	addressOk, laddr, err := checkBindAddressOK(conf)
+	if err != nil {
+		proxy.Logger.Printf("WARN: %v\n", err)
 	}
 
 	if addressOk {
@@ -339,7 +345,7 @@ func setActivityLog(conf *Configuration, proxy *goproxy.ProxyHttpServer) {
 }
 
 func setSignalHandler(conf *Configuration, proxy *goproxy.ProxyHttpServer, logger *ProxyLogger) {
-	signalChannel := make(chan os.Signal)
+	signalChannel := make(chan os.Signal, 1)
 	signal.Notify(signalChannel, os.Interrupt, syscall.SIGTERM, syscall.SIGUSR1)
 
 	signalHandler := func() {
@@ -412,36 +418,122 @@ func setHTTPLoggingHandler(proxy *goproxy.ProxyHttpServer, logger *ProxyLogger) 
 		})
 }
 
+func findMatchingProxy(host string, conf *Configuration) *url.URL {
+	var genericProxy *url.URL
+	var mostSpecificMatch *url.URL
+	mostSpecificLength := -1
+
+	// Get all rules keys and sort them by length in descending order
+	keys := make([]string, 0, len(conf.Rules))
+	for k := range conf.Rules {
+		keys = append(keys, k)
+	}
+
+	sort.Slice(keys, func(i, j int) bool {
+		return len(keys[i]) > len(keys[j])
+	})
+
+	// Iterate over sorted keys and find the most specific match
+	for _, domain := range keys {
+		proxyURL, exists := conf.Proxies[conf.Rules[domain]]
+		if !exists {
+			continue // Skip if the alias does not exist in the proxies map
+		}
+		parsedURL, _ := url.Parse(proxyURL)
+
+		if domain == "." {
+			genericProxy = parsedURL
+		} else if strings.HasSuffix(host, domain) && len(domain) > mostSpecificLength {
+			mostSpecificMatch = parsedURL
+			mostSpecificLength = len(domain)
+		}
+	}
+
+	if mostSpecificMatch != nil {
+		return mostSpecificMatch
+	}
+
+	if len(conf.ForwardProxyURL) > 0 {
+		genericProxy, _ = url.Parse(conf.ForwardProxyURL)
+	}
+
+	return genericProxy
+}
+
+func findMatchingForwardProxyURL(req *http.Request, conf *Configuration) *url.URL {
+	hostname := req.URL.Hostname()
+	proxyURL := findMatchingProxy(hostname, conf)
+	return proxyURL
+}
+
+func findMatchingProxyString(req *http.Request, conf *Configuration) string {
+	proxyURL := findMatchingForwardProxyURL(req, conf)
+	return proxyURL.String()
+}
+
+func connectDialWrapper(proxyURLString string, proxy *goproxy.ProxyHttpServer) ConnectDialFunc {
+	return func(network string, addr string) (net.Conn, error) {
+		var cp ConnectDialFunc
+
+		proxyURL, err := url.Parse(proxyURLString)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(proxyURL.User.String()) > 0 {
+			connectHandler := func(req *http.Request) {
+				req.Header.Del(ProxyAuthorizatonHeader)
+				if len(proxyURL.User.Username()) > 0 {
+					creds, err := url.QueryUnescape(proxyURL.User.String())
+					if err != nil {
+						proxy.Logger.Printf("can't decode the user credentials: %v", err)
+					}
+					req.Header.Set(ProxyAuthorizatonHeader, "Basic "+base64.StdEncoding.EncodeToString([]byte(creds)))
+				}
+			}
+			cp = proxy.NewConnectDialToProxyWithHandler(proxyURLString, connectHandler)
+		} else {
+			cp = proxy.NewConnectDialToProxy(proxyURLString)
+		}
+
+		return cp(network, addr)
+	}
+}
+
 func setForwardProxy(conf *Configuration, proxy *goproxy.ProxyHttpServer) {
-	if len(conf.ForwardProxyURL) == 0 {
+	if len(conf.ForwardProxyURL) == 0 && len(conf.Rules) == 0 {
 		return
 	}
 
-	u, err := url.Parse(conf.ForwardProxyURL)
-	if err != nil {
-		proxy.Logger.Printf("can't parse forward proxy URL: %v", err)
-		os.Exit(1)
+	proxy.Logger.Printf("Setting up proxy transport\n")
+
+	proxy.Tr = &http.Transport{
+		// Setup the Proxy function to dynamically select the proxy based on the request
+		Proxy: func(req *http.Request) (*url.URL, error) {
+			return findMatchingForwardProxyURL(req, conf), nil
+		},
 	}
 
-	proxy.Tr = &http.Transport{Proxy: func(req *http.Request) (*url.URL, error) {
-		return url.Parse(conf.ForwardProxyURL)
-	}}
+	proxy.ConnectDialWithReq = func(req *http.Request, network, addr string) (net.Conn, error) {
+		// Check if addr needs to be proxied
+		proxyURL := findMatchingProxyString(req, conf)
 
-	if len(u.User.String()) > 0 {
-		connectHandler := func(req *http.Request) {
-			req.Header.Del(ProxyAuthorizatonHeader)
-			if len(u.User.Username()) > 0 {
-				creds, err := url.QueryUnescape(u.User.String())
-				if err != nil {
-					proxy.Logger.Printf("can't decode the user credentials: %v", err)
-				}
-				req.Header.Set(ProxyAuthorizatonHeader, "Basic "+base64.StdEncoding.EncodeToString([]byte(creds)))
-			}
+		// If no proxy is needed, dial directly
+		if proxyURL == "" {
+			proxy.Logger.Printf("Dialing directly to %v\n", addr)
+			return net.Dial(network, addr)
 		}
-		proxy.ConnectDial = proxy.NewConnectDialToProxyWithHandler(conf.ForwardProxyURL, connectHandler)
-	} else {
-		proxy.ConnectDial = proxy.NewConnectDialToProxy(conf.ForwardProxyURL)
+
+		return connectDialWrapper(proxyURL, proxy)(network, addr)
 	}
+}
+
+func startServer(addr string, handler http.Handler) error {
+	err := http.ListenAndServe(addr, handler)
+	if err != nil {
+		return fmt.Errorf("failed to start server: %w", err)
+	}
+	return nil
 }
 
 func main() {
@@ -482,6 +574,8 @@ func main() {
 	}
 
 	proxy.Logger.Printf("starting proxy\n")
+	proxy.Logger.Printf("listening on %v\n", conf.Listen)
+	proxy.Logger.Printf("using configuration file %v\n", *configFile)
 
-	log.Fatal(http.ListenAndServe(conf.Listen, proxy))
+	log.Fatal(startServer(conf.Listen, proxy))
 }
