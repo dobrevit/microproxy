@@ -10,21 +10,23 @@ import (
 )
 
 type Configuration struct {
-	Listen              string     `toml:"listen"`
-	AccessLog           string     `toml:"access_log"`
-	ActivityLog         string     `toml:"activity_log"`
-	AllowedConnectPorts []int      `toml:"allowed_connect_ports"`
-	AllowedNetworks     []string   `toml:"allowed_networks"`
-	DisallowedNetworks  []string   `toml:"disallowed_networks"`
-	AuthRealm           string     `toml:"auth_realm"`
-	AuthType            string     `toml:"auth_type"`
-	AuthFile            string     `toml:"auth_file"`
-	ForwardedForHeader  string     `toml:"forwarded_for_header"`
-	BindIP              string     `toml:"bind_ip"`
-	ViaHeader           string     `toml:"via_header"`
-	ViaProxyName        string     `toml:"via_proxy_name"`
-	AddHeaders          [][]string `toml:"add_headers"`
-	ForwardProxyURL     string     `toml:"forward_proxy_url"`
+	Listen              string            `toml:"listen"`
+	AccessLog           string            `toml:"access_log"`
+	ActivityLog         string            `toml:"activity_log"`
+	AllowedConnectPorts []int             `toml:"allowed_connect_ports"`
+	AllowedNetworks     []string          `toml:"allowed_networks"`
+	DisallowedNetworks  []string          `toml:"disallowed_networks"`
+	AuthRealm           string            `toml:"auth_realm"`
+	AuthType            string            `toml:"auth_type"`
+	AuthFile            string            `toml:"auth_file"`
+	ForwardedForHeader  string            `toml:"forwarded_for_header"`
+	BindIP              string            `toml:"bind_ip"`
+	ViaHeader           string            `toml:"via_header"`
+	ViaProxyName        string            `toml:"via_proxy_name"`
+	AddHeaders          [][]string        `toml:"add_headers"`
+	Proxies             map[string]string `toml:"proxies"`
+	Rules               map[string]string `toml:"rules"`
+	ForwardProxyURL     string            `toml:"forward_proxy_url"`
 }
 
 const (
@@ -116,7 +118,7 @@ func newConfigurationFromFile(path string) *Configuration {
 
 func newConfiguration(data io.Reader) *Configuration {
 	var conf Configuration
-	if _, err := toml.DecodeReader(data, &conf); err != nil {
+	if _, err := toml.NewDecoder(data).Decode(&conf); err != nil {
 		log.Fatalf("Couldn't parse configuration file: %v", err)
 	}
 
