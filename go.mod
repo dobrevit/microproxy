@@ -4,5 +4,10 @@ go 1.22
 
 require (
 	github.com/BurntSushi/toml v1.4.0
-	github.com/elazarl/goproxy v0.0.0-20231117061959-7cc037d33fb5
+	github.com/elazarl/goproxy v1.7.0
+)
+
+require (
+	golang.org/x/net v0.34.0 // indirect
+	golang.org/x/text v0.21.0 // indirect
 )
