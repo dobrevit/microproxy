@@ -1,6 +1,6 @@
 module github.com/thekvs/microproxy
 
-go 1.22
+go 1.23.0
 
 require (
 	github.com/BurntSushi/toml v1.5.0
@@ -8,6 +8,6 @@ require (
 )
 
 require (
-	golang.org/x/net v0.35.0 // indirect
-	golang.org/x/text v0.22.0 // indirect
+	golang.org/x/net v0.38.0 // indirect
+	golang.org/x/text v0.23.0 // indirect
 )
