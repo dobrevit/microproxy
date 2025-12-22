@@ -1,4 +1,6 @@
 listen="127.0.0.1:3129"
+enable_health_check="on"
+http_listen="127.0.0.1:8080"
 access_log="/tmp/microproxy.access.log"
 activity_log="/tmp/microproxy.error.log"
 allowed_connect_ports=[443, 80]
