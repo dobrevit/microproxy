@@ -11,6 +11,8 @@ import (
 
 type Configuration struct {
 	Listen              string            `toml:"listen"`
+	HTTPListen          string            `toml:"http_listen"`
+	HealthCheckEnabled  string            `toml:"enable_health_check"`
 	AccessLog           string            `toml:"access_log"`
 	ActivityLog         string            `toml:"activity_log"`
 	AllowedConnectPorts []int             `toml:"allowed_connect_ports"`

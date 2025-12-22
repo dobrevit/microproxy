@@ -19,6 +19,8 @@ func compareSlices(s1, s2 []int) bool {
 func TestConfigFile(t *testing.T) {
 	expected := Configuration{
 		Listen:              "127.0.0.1:3129",
+		HTTPListen:          "127.0.0.1:8080",
+		HealthCheckEnabled:  "on",
 		AccessLog:           "/tmp/microproxy.access.log",
 		AuthType:            "basic",
 		AuthRealm:           "proxy",
@@ -58,5 +60,13 @@ func TestConfigFile(t *testing.T) {
 
 	if conf.ForwardedForHeader != expected.ForwardedForHeader {
 		t.Errorf("Got %v, expected %v", conf.ForwardedForHeader, expected.ForwardedForHeader)
+	}
+
+	if conf.HTTPListen != expected.HTTPListen {
+		t.Errorf("Got %v, expected %v", conf.HTTPListen, expected.HTTPListen)
+	}
+
+	if conf.HealthCheckEnabled != expected.HealthCheckEnabled {
+		t.Errorf("Got %v, expected %v", conf.HealthCheckEnabled, expected.HealthCheckEnabled)
 	}
 }

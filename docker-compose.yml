@@ -6,5 +6,8 @@ services:
       context: .
       dockerfile: Dockerfile
     image: microproxy:latest
+    command: [ "microproxy", "-config", "/usr/local/etc/microproxy.toml", "-i" ]
+    ports:
+      - "3128:3128"
     volumes:
       - ./microproxy-docker.toml:/usr/local/etc/microproxy.toml

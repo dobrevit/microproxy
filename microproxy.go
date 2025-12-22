@@ -344,7 +344,7 @@ func setActivityLog(conf *Configuration, proxy *goproxy.ProxyHttpServer) {
 	}
 }
 
-func setSignalHandler(conf *Configuration, proxy *goproxy.ProxyHttpServer, logger *ProxyLogger) {
+func setSignalHandler(conf *Configuration, proxy *goproxy.ProxyHttpServer, logger *ProxyLogger, cancel context.CancelFunc) {
 	signalChannel := make(chan os.Signal, 1)
 	signal.Notify(signalChannel, os.Interrupt, syscall.SIGTERM, syscall.SIGUSR1)
 
@@ -357,6 +357,7 @@ func setSignalHandler(conf *Configuration, proxy *goproxy.ProxyHttpServer, logge
 				if err != nil {
 					log.Printf("Close error: %v", err)
 				}
+				cancel()
 				os.Exit(0)
 			case syscall.SIGUSR1:
 				proxy.Logger.Printf("got USR1 signal, reopening logs\n")
@@ -528,12 +529,53 @@ func setForwardProxy(conf *Configuration, proxy *goproxy.ProxyHttpServer) {
 	}
 }
 
-func startServer(addr string, handler http.Handler) error {
+func startProxyServer(addr string, handler http.Handler) error {
 	err := http.ListenAndServe(addr, handler)
 	if err != nil {
 		return fmt.Errorf("failed to start server: %w", err)
 	}
 	return nil
+}
+
+func startHTTPServer(addr string, health *ProxyHealth) error {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", healthCheckHandler(health)) // Health check endpoint
+
+	server := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+
+	err := server.ListenAndServe()
+	if err != nil {
+		return fmt.Errorf("failed to start server: %w", err)
+	}
+	return nil
+}
+
+func healthCheckHandler(health *ProxyHealth) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if health.IsHealthy() {
+			fmt.Fprintln(w, "Proxy is healthy")
+		} else {
+			http.Error(w, "Proxy is unhealthy", http.StatusServiceUnavailable)
+		}
+	}
+}
+
+func setupProxyHealthHandlers(conf *Configuration, proxy *goproxy.ProxyHttpServer, health *ProxyHealth) {
+	if conf.HealthCheckEnabled == "on" {
+		proxy.OnResponse().DoFunc(
+			func(resp *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
+				proxy.Logger.Printf("Response code: %s", resp.StatusCode)
+				if resp.StatusCode == http.StatusProxyAuthRequired {
+					health.RecordFailure() // record a failure for auth errors
+				} else {
+					health.RecordSuccess() // record a success for valid responses
+				}
+				return resp
+			})
+	}
 }
 
 func main() {
@@ -551,10 +593,16 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Create a context to handle termination signals
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	proxy := createProxy(conf)
 	proxy.Verbose = *verboseMode
 
 	logger := newProxyLogger(conf)
+
+	health := &ProxyHealth{Healthy: true, FailureLimit: 5}
 
 	setHTTPLoggingHandler(proxy, logger)
 	setForwardProxy(conf, proxy)
@@ -563,7 +611,8 @@ func main() {
 	setForwardedForHeaderHandler(conf, proxy)
 	setViaHeaderHandler(conf, proxy)
 	setAddCustomHeadersHandler(conf, proxy)
-	setSignalHandler(conf, proxy, logger)
+	setupProxyHealthHandlers(conf, proxy, health)
+	setSignalHandler(conf, proxy, logger, cancel)
 
 	// To be called first while processing handlers' stack,
 	// has to be placed last in the source code.
@@ -574,8 +623,17 @@ func main() {
 	}
 
 	proxy.Logger.Printf("starting proxy\n")
-	proxy.Logger.Printf("listening on %v\n", conf.Listen)
-	proxy.Logger.Printf("using configuration file %v\n", *configFile)
 
-	log.Fatal(startServer(conf.Listen, proxy))
+	go func() {
+		log.Fatal(startProxyServer(conf.Listen, proxy))
+	}()
+
+	if conf.HealthCheckEnabled == "on" {
+		go func() {
+			log.Fatal(startHTTPServer(conf.HTTPListen, health))
+		}()
+	}
+
+	// Wait for the context to be closed
+	<-ctx.Done()
 }
