@@ -1,11 +1,11 @@
 module github.com/dobrevit/microproxy
 
-go 1.24.0
+go 1.25.0
 
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/elazarl/goproxy v1.8.5
-	golang.org/x/net v0.48.0
+	golang.org/x/net v0.55.0
 )
 
-require golang.org/x/text v0.32.0 // indirect
+require golang.org/x/text v0.37.0 // indirect
