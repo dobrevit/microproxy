@@ -1,6 +1,10 @@
 listen="0.0.0.0:3128"
+socks_listen="0.0.0.0:1080"
+enable_health_check="on"
+http_listen="0.0.0.0:8080"
 access_log="/dev/stdout"
 activity_log="/dev/stderr"
 allowed_connect_ports=[443, 80]
 forwarded_for_header="on"
+via_header="on"
 allowed_networks=["0.0.0.0/0"]

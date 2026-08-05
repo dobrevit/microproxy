@@ -1,4 +1,5 @@
-microproxy
+# the built binary, anchored so that it does not also match cmd/microproxy/
+/microproxy
 .tags*
 *.sublime*
 *.swp

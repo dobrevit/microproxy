@@ -1,0 +1,133 @@
+# golangci-lint configuration.
+#
+#   golangci-lint run ./...        report
+#   golangci-lint run --fix ./...  fix what can be fixed automatically
+#   golangci-lint fmt ./...        formatting only
+#
+# The set below is meant to stay quiet: a report should mean something is
+# wrong, not that a rule has an opinion. Every disabled rule says why.
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: standard
+
+  enable:
+    # this is a library other programs embed, so the exported surface has to
+    # be documented and behave
+    - revive
+    # a proxy handles other people's traffic
+    - gosec
+    - bodyclose
+    - noctx
+    # errors
+    - errorlint
+    - nilerr
+    # wrapcheck is deliberately not enabled: almost everything it flags here is
+    # a pass-through where the caller already knows what was being attempted,
+    # so it produces churn rather than better messages
+    # correctness
+    - copyloopvar
+    - durationcheck
+    - makezero
+    - reassign
+    - rowserrcheck
+    # readability, only the parts that catch real mistakes
+    - gocritic
+    - misspell
+    - unconvert
+    - usestdlibvars
+
+  settings:
+    revive:
+      rules:
+        - name: exported
+        - name: indent-error-flow
+        - name: errorf
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: error-naming
+        - name: error-return
+        - name: error-strings
+        - name: increment-decrement
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: var-declaration
+        - name: unexported-return
+        # the handler signatures of net/http and goproxy are fixed, so an
+        # unused parameter there is the interface, not an oversight
+        - name: unused-parameter
+          disabled: true
+
+    staticcheck:
+      checks:
+        - all
+        # "could remove embedded field from selector": spelling out the
+        # embedded connection is what makes the delegation in timedConn
+        # readable, and what stops a later override from silently recursing
+        - "-QF1008"
+
+    gosec:
+      excludes:
+        # the proxy deliberately talks to whatever url a client asked for
+        - G107
+      config:
+        # 0o600 for the log files it creates
+        G306: "0600"
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+      disabled-checks:
+        # the codebase writes if/else where it reads better than a switch
+        - ifElseChain
+        # named results are used deliberately for documentation
+        - unnamedResult
+        # hugeParam wants pointers where a Config value is copied on purpose
+        - hugeParam
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+
+    rules:
+      # closing a connection or a file on the way out has nothing useful to
+      # do with the error
+      - linters: [errcheck]
+        source: '^\s*defer .*\.Close\(\)$'
+
+      # tests are allowed to be blunt
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+          - noctx
+          - wrapcheck
+          - bodyclose
+
+      # the vendored dependencies are not ours to lint
+      - path: vendor/
+        linters: [revive, gocritic, gosec, staticcheck, errcheck]
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/dobrevit/microproxy
+
+  exclusions:
+    generated: lax

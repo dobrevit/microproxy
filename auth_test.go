@@ -1,12 +1,9 @@
-package main
+package microproxy
 
 import (
-	"bytes"
 	"crypto/md5"
-	"crypto/tls"
 	"encoding/base64"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -15,8 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/elazarl/goproxy"
 )
 
 // >>> import hashlib
@@ -35,433 +30,461 @@ const (
 	qop      = "auth"
 )
 
-type ConstantHanlder string
+func testBasicUsers() *BasicUsers {
+	users := NewBasicUsers(realm)
+	users.Set(user, password)
 
-func (h ConstantHanlder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	_, err := io.WriteString(w, string(h))
-	if err != nil {
-		fmt.Printf("Error: %v", err)
-	}
+	return users
 }
 
-func oneShotProxy() (client *http.Client, proxy *goproxy.ProxyHttpServer, s *httptest.Server) {
-	proxy = goproxy.NewProxyHttpServer()
-	s = httptest.NewServer(proxy)
+func testDigestUsers() *DigestUsers {
+	users := NewDigestUsers(realm)
+	users.SetHA1(user, realm, ha1)
 
-	proxyURL, _ := url.Parse(s.URL)
-
-	tr := &http.Transport{
-		Proxy:           http.ProxyURL(proxyURL),
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-	}
-
-	client = &http.Client{Transport: tr}
-
-	return client, proxy, s
-}
-
-func times(n int, s string) string {
-	r := make([]byte, 0, n*len(s))
-
-	for i := 0; i < n; i++ {
-		r = append(r, s...)
-	}
-
-	return string(r)
-}
-
-func TestBasicConnectAuthWithCurl(t *testing.T) {
-	expected := ":c>"
-
-	background := httptest.NewTLSServer(ConstantHanlder(expected))
-	defer background.Close()
-
-	_, proxy, proxyserver := oneShotProxy()
-	defer proxyserver.Close()
-
-	s := user + ":" + password + "\n"
-	file := bytes.NewBuffer([]byte(s))
-	auth, err := newBasicAuth(file)
-	if err != nil {
-		t.Fatalf("couldn't create digest auth structure: %v", err)
-	}
-	setProxyBasicAuth(proxy, realm, makeBasicAuthValidator(auth), nil)
-
-	authString := user + ":" + password
-	cmd := exec.Command("curl",
-		"--silent",
-		"--show-error",
-		"--insecure",
-		"--proxy", proxyserver.URL,
-		"--proxy-user", authString,
-		"--proxytunnel",
-		"--url", background.URL+"/[1-3]",
-	)
-
-	out, err := cmd.CombinedOutput() // if curl got error, it'll show up in stderr
-	if err != nil {
-		t.Fatal(err, string(out))
-	}
-
-	finalexpected := times(3, expected)
-	if string(out) != finalexpected {
-		t.Error("Expected", finalexpected, "got", string(out))
-	}
-}
-
-func TestBasicAuthWithCurl(t *testing.T) {
-	expected := ":c>"
-
-	background := httptest.NewServer(ConstantHanlder(expected))
-	defer background.Close()
-
-	_, proxy, proxyserver := oneShotProxy()
-	defer proxyserver.Close()
-
-	s := user + ":" + password + "\n"
-	file := bytes.NewBuffer([]byte(s))
-	auth, err := newBasicAuth(file)
-	if err != nil {
-		t.Fatalf("couldn't create digest auth structure: %v", err)
-	}
-	setProxyBasicAuth(proxy, realm, makeBasicAuthValidator(auth), nil)
-
-	authString := user + ":" + password
-	cmd := exec.Command("curl",
-		"--silent",
-		"--show-error",
-		"--proxy", proxyserver.URL,
-		"--proxy-user", authString,
-		"--url", background.URL+"/[1-3]",
-	)
-
-	out, err := cmd.CombinedOutput() // if curl got error, it'll show up in stderr
-	if err != nil {
-		t.Fatal(err, string(out))
-	}
-
-	finalexpected := times(3, expected)
-	if string(out) != finalexpected {
-		t.Error("Expected", finalexpected, "got", string(out))
-	}
+	return users
 }
 
 func TestBasicAuth(t *testing.T) {
 	expected := "hello"
 
-	background := httptest.NewServer(ConstantHanlder(expected))
+	background := httptest.NewServer(constantHandler(expected))
 	defer background.Close()
 
-	client, proxy, proxyserver := oneShotProxy()
-	defer proxyserver.Close()
+	client, _ := newTestProxy(t, Config{}, WithCredentials(testBasicUsers()))
 
-	s := user + ":" + password + "\n"
-	file := bytes.NewBuffer([]byte(s))
-	auth, err := newBasicAuth(file)
-	if err != nil {
-		t.Fatalf("couldn't create digest auth structure: %v", err)
-	}
-	setProxyBasicAuth(proxy, realm, makeBasicAuthValidator(auth), nil)
-
-	// without auth
+	// without credentials
 	resp, err := client.Get(background.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectedProxyAuthenticate := fmt.Sprintf("Basic realm=\"%s\"", realm)
-	if resp.Header.Get("Proxy-Authenticate") != expectedProxyAuthenticate {
-		t.Error("Expected Proxy-Authenticate header got", resp.Header.Get("Proxy-Authenticate"))
-	}
-	if resp.StatusCode != 407 {
-		t.Error("Expected status 407 Proxy Authentication Required, got", resp.Status)
+	defer resp.Body.Close()
+
+	expectedChallenge := fmt.Sprintf("Basic realm=%q", realm)
+	if challenge := resp.Header.Get("Proxy-Authenticate"); challenge != expectedChallenge {
+		t.Errorf("expected the challenge %v, got %v", expectedChallenge, challenge)
 	}
 
-	// with auth
-	req, err := http.NewRequest("GET", background.URL, nil)
+	if resp.StatusCode != http.StatusProxyAuthRequired {
+		t.Error("expected status 407 Proxy Authentication Required, got", resp.Status)
+	}
+
+	// with credentials
+	req, err := http.NewRequest(http.MethodGet, background.URL, http.NoBody)
 	if err != nil {
 		t.Fatal(err)
 	}
-	authString := user + ":" + password
-	header := "Basic " + base64.StdEncoding.EncodeToString([]byte(authString))
-	req.Header.Set("Proxy-Authorization", header)
+	req.Header.Set("Proxy-Authorization",
+		"Basic "+base64.StdEncoding.EncodeToString([]byte(user+":"+password)))
+
 	resp, err = client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != 200 {
-		t.Error("Expected status 200 OK, got", resp.Status)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Error("expected status 200 OK, got", resp.Status)
 	}
-	msg, err := io.ReadAll(resp.Body)
+
+	if body := readBody(t, resp); body != expected {
+		t.Errorf("expected '%s', got '%s'", expected, body)
+	}
+}
+
+func TestBasicAuthRejectsAWrongPassword(t *testing.T) {
+	background := httptest.NewServer(constantHandler("hello"))
+	defer background.Close()
+
+	client, _ := newTestProxy(t, Config{}, WithCredentials(testBasicUsers()))
+
+	for name, credentials := range map[string]string{
+		"wrong password": user + ":wrong",
+		"unknown user":   "nobody:" + password,
+		"empty":          ":",
+	} {
+		req, err := http.NewRequest(http.MethodGet, background.URL, http.NoBody)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Proxy-Authorization",
+			"Basic "+base64.StdEncoding.EncodeToString([]byte(credentials)))
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusProxyAuthRequired {
+			t.Errorf("%v: expected status 407, got %v", name, resp.Status)
+		}
+	}
+}
+
+// digestResponse computes what a client authenticating as the test user would
+// send back for the given nonce.
+func digestResponse(nonce string) string {
+	ha2 := fmt.Sprintf("%x", md5.Sum([]byte(method+":"+uri)))
+
+	return fmt.Sprintf("%x", md5.Sum([]byte(strings.Join(
+		[]string{ha1, nonce, nc, cnonce, qop, ha2}, ":"))))
+}
+
+func digestHeader(nonce, response, counter string) string {
+	return fmt.Sprintf(
+		"Digest username=%q, realm=%q, nonce=%q, uri=%q, response=%q, qop=%s, nc=%s, cnonce=%q",
+		user, realm, nonce, uri, response, qop, counter, cnonce)
+}
+
+// challengeNonce asks the proxy for a challenge and returns the nonce it
+// offered.
+func challengeNonce(t *testing.T, client *http.Client, targetURL string) string {
+	t.Helper()
+
+	resp, err := client.Get(targetURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(msg) != "hello" {
-		t.Errorf("Expected '%s', actual '%s'", expected, string(msg))
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusProxyAuthRequired {
+		t.Fatal("expected status 407 Proxy Authentication Required, got", resp.Status)
 	}
+
+	header := resp.Header.Get("Proxy-Authenticate")
+	if header == "" {
+		t.Fatal("couldn't get the expected Proxy-Authenticate header")
+	}
+
+	scheme, parameters, found := strings.Cut(header, " ")
+	if !found || scheme != "Digest" {
+		t.Fatal("expected a Digest Proxy-Authenticate header, got", header)
+	}
+
+	matches := regexp.MustCompile(`nonce="(.*?)"`).FindAllStringSubmatch(parameters, -1)
+	if len(matches) == 0 {
+		t.Fatal("the challenge carries no nonce:", header)
+	}
+
+	return matches[0][1]
 }
 
 func TestDigestAuth(t *testing.T) {
 	expected := "Hello, World!"
 
-	background := httptest.NewServer(ConstantHanlder(expected))
+	background := httptest.NewServer(constantHandler(expected))
 	defer background.Close()
 
-	client, proxy, proxyserver := oneShotProxy()
-	defer proxyserver.Close()
+	client, _ := newTestProxy(t, Config{}, WithCredentials(testDigestUsers()))
 
-	s := user + ":" + realm + ":" + ha1 + "\n"
-	file := bytes.NewBuffer([]byte(s))
-	auth, err := newDigestAuth(file)
+	nonce := challengeNonce(t, client, background.URL)
+
+	req, err := http.NewRequest(http.MethodGet, background.URL, http.NoBody)
 	if err != nil {
-		t.Fatalf("couldn't create digest auth structure: %v", err)
+		t.Fatal(err)
 	}
-	setProxyDigestAuth(proxy, realm, makeDigestAuthValidator(auth), nil)
+	req.Header.Set("Proxy-Authorization", digestHeader(nonce, digestResponse(nonce), nc))
 
-	// without auth
-	resp, err := client.Get(background.URL)
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	header := resp.Header.Get("Proxy-Authenticate")
-	if len(header) == 0 {
-		t.Error("Couldn't get expected Proxy-Authenticate header")
+	if resp.StatusCode != http.StatusOK {
+		t.Error("expected status 200 OK, got", resp.Status)
 	}
 
-	splitted := strings.SplitN(header, " ", 2)
-	if splitted[0] != "Digest" {
-		t.Error("Expected Digest Proxy-Authenticate header got", header)
+	if body := readBody(t, resp); body != expected {
+		t.Errorf("expected '%s', got '%s'", expected, body)
 	}
-	if resp.StatusCode != 407 {
-		t.Error("Expected status 407 Proxy Authentication Required, got", resp.Status)
+}
+
+// A nonce counter that does not move on is a replayed request, and the second
+// one has to be refused even though its digest is perfectly valid.
+func TestDigestAuthRejectsAReplayedNonceCounter(t *testing.T) {
+	background := httptest.NewServer(constantHandler("Hello, World!"))
+	defer background.Close()
+
+	client, _ := newTestProxy(t, Config{}, WithCredentials(testDigestUsers()))
+
+	nonce := challengeNonce(t, client, background.URL)
+	header := digestHeader(nonce, digestResponse(nonce), nc)
+
+	statuses := make([]int, 0, 2)
+
+	for i := 0; i < 2; i++ {
+		req, err := http.NewRequest(http.MethodGet, background.URL, http.NoBody)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Proxy-Authorization", header)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+
+		statuses = append(statuses, resp.StatusCode)
 	}
 
-	nonceRegexp := regexp.MustCompile("nonce=\"(.*?)\"")
-	nonce := nonceRegexp.FindAllStringSubmatch(splitted[1], -1)[0][1]
+	if statuses[0] != http.StatusOK {
+		t.Error("expected the first request to be served, got", statuses[0])
+	}
 
-	s = method + ":" + uri
-	ha2 := fmt.Sprintf("%x", md5.Sum([]byte(s)))
-	s = ha1 + ":" + nonce + ":" + nc + ":" + cnonce + ":" + qop + ":" + ha2
-	response := fmt.Sprintf("%x", md5.Sum([]byte(s)))
+	if statuses[1] != http.StatusProxyAuthRequired {
+		t.Error("expected the replayed request to be refused, got", statuses[1])
+	}
+}
 
-	proxyAuthorizationHeader := fmt.Sprintf("Digest username=\"%s\", realm=\"%s\", nonce=\"%s\", uri=\"%s\", response=\"%s\", qop=%s, nc=%s, cnonce=\"%s\"",
-		user, realm, nonce, uri, response, qop, nc, cnonce)
+// A nonce this proxy never issued has to be refused, whatever digest comes
+// with it.
+func TestDigestAuthRejectsAnUnknownNonce(t *testing.T) {
+	background := httptest.NewServer(constantHandler("Hello, World!"))
+	defer background.Close()
 
-	// with auth
-	req, err := http.NewRequest("GET", background.URL, nil)
+	client, _ := newTestProxy(t, Config{}, WithCredentials(testDigestUsers()))
+
+	nonce := "0123456789abcdef0123456789abcdef"
+
+	req, err := http.NewRequest(http.MethodGet, background.URL, http.NoBody)
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Proxy-Authorization", proxyAuthorizationHeader)
+	req.Header.Set("Proxy-Authorization", digestHeader(nonce, digestResponse(nonce), nc))
 
-	resp, err = client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != 200 {
-		t.Error("Expected status 200 OK, got", resp.Status)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusProxyAuthRequired {
+		t.Error("expected status 407, got", resp.Status)
+	}
+}
+
+func TestBasicAuthWithCurl(t *testing.T) {
+	needsCommand(t, "curl")
+
+	expected := ":c>"
+
+	background := httptest.NewServer(constantHandler(expected))
+	defer background.Close()
+
+	_, proxyURL := newTestProxy(t, Config{}, WithCredentials(testBasicUsers()))
+
+	out, err := exec.Command("curl",
+		"--silent",
+		"--show-error",
+		"--proxy", proxyURL,
+		"--proxy-user", user+":"+password,
+		"--url", background.URL+"/[1-3]",
+	).CombinedOutput()
+	if err != nil {
+		t.Fatal(err, string(out))
 	}
 
-	msg, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatal(err)
+	if expected := times(3, expected); string(out) != expected {
+		t.Error("expected", expected, "got", string(out))
 	}
-	if string(msg) != expected {
-		t.Errorf("Expected '%s', actual '%s'", expected, string(msg))
+}
+
+func TestBasicConnectAuthWithCurl(t *testing.T) {
+	needsCommand(t, "curl")
+
+	expected := ":c>"
+
+	background := httptest.NewTLSServer(constantHandler(expected))
+	defer background.Close()
+
+	_, proxyURL := newTestProxy(t,
+		Config{AllowedConnectPorts: []int{portOf(t, background.URL)}},
+		WithCredentials(testBasicUsers()))
+
+	out, err := exec.Command("curl",
+		"--silent",
+		"--show-error",
+		"--insecure",
+		"--proxy", proxyURL,
+		"--proxy-user", user+":"+password,
+		"--proxytunnel",
+		"--url", background.URL+"/[1-3]",
+	).CombinedOutput()
+	if err != nil {
+		t.Fatal(err, string(out))
+	}
+
+	if expected := times(3, expected); string(out) != expected {
+		t.Error("expected", expected, "got", string(out))
+	}
+}
+
+func TestDigestAuthWithCurl(t *testing.T) {
+	needsCommand(t, "curl")
+
+	expected := "Hello, World!"
+
+	background := httptest.NewServer(constantHandler(expected))
+	defer background.Close()
+
+	_, proxyURL := newTestProxy(t, Config{}, WithCredentials(testDigestUsers()))
+
+	out, err := exec.Command("curl",
+		"--silent",
+		"--show-error",
+		"--proxy-digest",
+		"--proxy", proxyURL,
+		"--proxy-user", user+":"+password,
+		"--url", background.URL,
+	).CombinedOutput()
+	if err != nil {
+		t.Fatal(err, string(out))
+	}
+
+	if string(out) != expected {
+		t.Error("expected", expected, "got", string(out))
 	}
 }
 
 func TestDigestAuthWithPython(t *testing.T) {
+	needsCommand(t, "python3")
+
 	expected := "Hello, World!"
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	background := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Content-Type", "text/plain")
 		fmt.Fprint(w, expected)
 	}))
-	defer ts.Close()
+	defer background.Close()
 
-	_, proxy, proxyserver := oneShotProxy()
-	defer proxyserver.Close()
+	_, proxyURL := newTestProxy(t, Config{}, WithCredentials(testDigestUsers()))
 
-	s := user + ":" + realm + ":" + ha1 + "\n"
-	file := bytes.NewBuffer([]byte(s))
-	auth, err := newDigestAuth(file)
-	if err != nil {
-		t.Fatalf("couldn't create digest auth structure: %v", err)
-	}
-	setProxyDigestAuth(proxy, realm, makeDigestAuthValidator(auth), nil)
-
-	cmd := exec.Command("python3",
+	out, err := exec.Command("python3",
 		"proxy-digest-auth-test.py",
-		"--proxy", proxyserver.URL,
+		"--proxy", proxyURL,
 		"--user", user,
 		"--password", password,
-		"--url", ts.URL,
-	)
-
-	out, err := cmd.CombinedOutput()
+		"--url", background.URL,
+	).CombinedOutput()
 	if err != nil {
 		t.Fatal(err, string(out))
 	}
 
 	// python adds '\n' so we need to remove it
-	outString := string(out)
-	result := strings.Trim(outString, "\r\n")
+	result := strings.Trim(string(out), "\r\n")
 
 	// output comes in the form b'...', so remove prefix "b'" and suffix "'"
 	if len(result) <= 3 {
 		t.Fatal("response is too short")
 	}
-	result = result[2 : len(result)-2]
-	if result != expected {
-		t.Error("Expected", expected, "got", result)
-	}
-}
 
-func TestDigestAuthWithCurl(t *testing.T) {
-	expected := "Hello, World!"
-
-	background := httptest.NewServer(ConstantHanlder(expected))
-	defer background.Close()
-
-	_, proxy, proxyserver := oneShotProxy()
-	defer proxyserver.Close()
-
-	s := user + ":" + realm + ":" + ha1 + "\n"
-	file := bytes.NewBuffer([]byte(s))
-	auth, err := newDigestAuth(file)
-	if err != nil {
-		t.Fatalf("couldn't create digest auth structure: %v", err)
-	}
-	setProxyDigestAuth(proxy, realm, makeDigestAuthValidator(auth), nil)
-
-	authString := user + ":" + password
-	cmd := exec.Command("curl",
-		"--silent",
-		"--show-error",
-		"--proxy-digest",
-		"--proxy", proxyserver.URL,
-		"--proxy-user", authString,
-		"--url", background.URL,
-	)
-
-	out, err := cmd.CombinedOutput() // if curl got error, it'll show up in stderr
-	if err != nil {
-		t.Fatal(err, string(out))
-	}
-
-	result := string(out)
-
-	if result != expected {
-		t.Error("Expected", expected, "got", result)
+	if result = result[2 : len(result)-2]; result != expected {
+		t.Error("expected", expected, "got", result)
 	}
 }
 
 func TestIPBasedAccessDenied(t *testing.T) {
-	expected := "Hello, World!"
-
-	background := httptest.NewServer(ConstantHanlder(expected))
+	background := httptest.NewServer(constantHandler("Hello, World!"))
 	defer background.Close()
 
-	client, proxy, proxyserver := oneShotProxy()
-	defer proxyserver.Close()
-
-	s := "allowed_networks = [\"172.16.11.0/24\"]\n"
-	conf := newConfiguration(bytes.NewBuffer([]byte(s)))
-	setAllowedNetworksHandler(conf, proxy)
+	client, _ := newTestProxy(t, Config{AllowedNetworks: []string{"172.16.11.0/24"}})
 
 	resp, err := client.Get(background.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
+	resp.Body.Close()
 
-	if resp.StatusCode != 403 {
-		t.Error("Expected 403 status code, got", resp.Status)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Error("expected 403 status code, got", resp.Status)
 	}
 }
 
 func TestIPBasedAccessAllowed(t *testing.T) {
 	expected := "Hello, World!"
 
-	background := httptest.NewServer(ConstantHanlder(expected))
+	background := httptest.NewServer(constantHandler(expected))
 	defer background.Close()
 
-	client, proxy, proxyserver := oneShotProxy()
-	defer proxyserver.Close()
-
-	s := "allowed_networks=[\"127.0.0.1/32\"]\n"
-	conf := newConfiguration(bytes.NewBuffer([]byte(s)))
-	setAllowedNetworksHandler(conf, proxy)
+	client, _ := newTestProxy(t, Config{AllowedNetworks: []string{"127.0.0.1/32"}})
 
 	resp, err := client.Get(background.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if resp.StatusCode != 200 {
-		t.Error("Expected 200 status code, got", resp.Status)
+	if resp.StatusCode != http.StatusOK {
+		t.Error("expected 200 status code, got", resp.Status)
 	}
 
-	msg, err := io.ReadAll(resp.Body)
+	if body := readBody(t, resp); body != expected {
+		t.Errorf("expected '%s', got '%s'", expected, body)
+	}
+}
+
+// A client that is on the disallowed list is refused even when the allowed
+// list would let it through.
+func TestDisallowedNetworkWins(t *testing.T) {
+	background := httptest.NewServer(constantHandler("Hello, World!"))
+	defer background.Close()
+
+	client, _ := newTestProxy(t, Config{
+		AllowedNetworks:    []string{"127.0.0.0/8"},
+		DisallowedNetworks: []string{"127.0.0.1/32"},
+	})
+
+	resp, err := client.Get(background.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
+	resp.Body.Close()
 
-	actual := string(msg)
-	if actual != expected {
-		t.Errorf("Expected '%s', actual '%s'", expected, actual)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Error("expected 403 status code, got", resp.Status)
 	}
 }
 
 func TestHTTPSConnectDenied(t *testing.T) {
-	expected := "Hello, World!"
-
-	background := httptest.NewTLSServer(ConstantHanlder(expected))
+	background := httptest.NewTLSServer(constantHandler("Hello, World!"))
 	defer background.Close()
 
-	client, proxy, proxyserver := oneShotProxy()
-	defer proxyserver.Close()
+	// the test server binds to a port other than 443
+	client, _ := newTestProxy(t, Config{AllowedConnectPorts: []int{443}})
 
-	// test server'll bind to the port different from 443
-	s := fmt.Sprintf("allowed_connect_ports=[%d]\n", 443)
-	conf := newConfiguration(bytes.NewBuffer([]byte(s)))
-	setAllowedConnectPortsHandler(conf, proxy)
-
-	_, err := client.Get(background.URL)
-	if err == nil {
-		t.Fatal(err)
+	if _, err := client.Get(background.URL); err == nil {
+		t.Fatal("expected the CONNECT request to be rejected")
 	}
 }
 
 func TestHTTPSConnectAllowed(t *testing.T) {
-	expected := "Hello, World!"
-
-	background := httptest.NewTLSServer(ConstantHanlder(expected))
+	background := httptest.NewTLSServer(constantHandler("Hello, World!"))
 	defer background.Close()
 
-	parsedURL, err := url.Parse(background.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	port, err := strconv.ParseUint(strings.Split(parsedURL.Host, ":")[1], 10, 16)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	client, proxy, proxyserver := oneShotProxy()
-	defer proxyserver.Close()
-
-	s := fmt.Sprintf("allowed_connect_ports=[%d]\n", port)
-	conf := newConfiguration(bytes.NewBuffer([]byte(s)))
-	setAllowedConnectPortsHandler(conf, proxy)
+	client, _ := newTestProxy(t, Config{AllowedConnectPorts: []int{portOf(t, background.URL)}})
 
 	resp, err := client.Get(background.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
+	resp.Body.Close()
 
-	if resp.StatusCode != 200 {
-		t.Error("Expected 200 status code, got", resp.Status)
+	if resp.StatusCode != http.StatusOK {
+		t.Error("expected 200 status code, got", resp.Status)
 	}
+}
+
+func portOf(t *testing.T, rawURL string) int {
+	t.Helper()
+
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("couldn't parse %v: %v", rawURL, err)
+	}
+
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil {
+		t.Fatalf("couldn't read the port of %v: %v", rawURL, err)
+	}
+
+	return port
 }
