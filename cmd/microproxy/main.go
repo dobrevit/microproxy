@@ -62,6 +62,10 @@ type proxy struct {
 	// healthServer is the separate listener the /health endpoint is served
 	// on, when the configuration asks for one.
 	healthServer *http.Server
+
+	// certificates holds the proxy's own certificate when the listener speaks
+	// TLS, so that a renewed one can be picked up without a restart.
+	certificates *certificateReloader
 }
 
 func run(conf *fileConfig, path string, verbose, insecure bool) error {
@@ -94,12 +98,28 @@ func run(conf *fileConfig, path string, verbose, insecure bool) error {
 	}
 	options = append(options, microproxy.WithCredentials(credentials))
 
+	var certificates *certificateReloader
+
+	if conf.tlsEnabled() {
+		if certificates, err = newCertificateReloader(conf.TLSCertFile, conf.TLSKeyFile); err != nil {
+			return err
+		}
+
+		options = append(options, microproxy.WithListenerTLS(certificates.tlsConfig()))
+	}
+
 	server, err := microproxy.New(conf.Config, options...)
 	if err != nil {
 		return err
 	}
 
-	command := &proxy{server: server, activity: activity, access: access, path: path}
+	command := &proxy{
+		server:       server,
+		activity:     activity,
+		access:       access,
+		path:         path,
+		certificates: certificates,
+	}
 	command.handleSignals()
 
 	activity.Printf("starting proxy\n")
@@ -238,6 +258,17 @@ func (p *proxy) reload() {
 		p.activity.Printf("ERROR: couldn't install the reloaded credentials: %v\n", err)
 
 		return
+	}
+
+	// The certificate is re-read from the paths the running proxy started
+	// with: the listener is already up, so a reload can't move it to a
+	// different file, and a renewal replaces the contents in place anyway.
+	if p.certificates != nil {
+		if err := p.certificates.reload(); err != nil {
+			p.activity.Printf("ERROR: couldn't reload the certificate, keeping the current one: %v\n", err)
+		} else {
+			p.activity.Printf("certificate reloaded\n")
+		}
 	}
 
 	p.activity.Printf("configuration reloaded\n")

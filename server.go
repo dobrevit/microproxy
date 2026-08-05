@@ -50,6 +50,11 @@ type Server struct {
 	verbose   bool
 	health    *Health
 
+	// listenerTLS, when set, makes the HTTP frontend accept TLS connections
+	// rather than plain ones. It is the server side, and has nothing to do
+	// with tlsConfig, which is how this proxy talks to an https:// upstream.
+	listenerTLS *tls.Config
+
 	envRoutes routeCache
 
 	// localAddr is where outgoing connections are made from. It comes from
@@ -185,13 +190,21 @@ func (s *Server) Handler() http.Handler {
 }
 
 // Serve accepts connections on l until it is closed or Shutdown is called.
+//
+// When WithListenerTLS is in force, l is wrapped so that clients speak the
+// proxy protocol inside a TLS connection. Do not pass an already wrapped
+// listener as well.
 func (s *Server) Serve(l net.Listener) error {
+	if s.listenerTLS != nil {
+		l = tls.NewListener(l, s.listenerTLS)
+	}
+
 	server, err := s.startServing(l)
 	if err != nil {
 		return err
 	}
 
-	s.log.Printf("starting proxy on %v\n", l.Addr())
+	s.log.Printf("starting proxy on %v (tls: %v)\n", l.Addr(), s.listenerTLS != nil)
 
 	return server.Serve(l)
 }

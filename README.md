@@ -137,6 +137,7 @@ configuration file. Below is a list of supported options.
 * `bind_ip="ip"` -- specify which IP will be used for outgoing connections.
 * `add_headers=[["header1", "value1"], ["header2", "value2"]...]` -- adds the specified headers to outgoing HTTP requests, this option will not work for HTTPS connections.
 * `read_timeout`/`write_timeout` -- how long a single read or write on a proxied connection may take, e.g. `"15m"`. A negative value disables the deadline. Default: 15 minutes.
+* `tls_cert_file`/`tls_key_file` -- the proxy's own certificate and key. Setting them makes the proxy listener accept TLS connections instead of plain ones. Both are needed, or neither.
 * `enable_health_check="on"` -- track whether the proxy is serving requests successfully and expose the result at `/health`. Needs `http_listen`.
 * `http_listen="ip:port"` -- ip address and port the `/health` endpoint is served on. This is not a proxy listener; nothing is proxied there.
 * `health_failure_limit=N` -- how many consecutive failures make the proxy unhealthy. Default: 5.
@@ -190,6 +191,49 @@ store verifies the password directly, and a Digest store verifies it by
 computing the digest it would have produced. When no credentials are configured,
 SOCKS clients are accepted without authentication and the network ACLs are the
 only thing limiting them.
+
+### Encrypting the connection to the proxy
+
+By default a client talks to the proxy in the clear, which puts the
+`Proxy-Authorization` credentials and the host names of every `CONNECT` request
+on the local network. Setting `tls_cert_file` and `tls_key_file` makes the proxy
+listener accept TLS, so the client speaks the proxy protocol inside a TLS
+connection — what a browser calls an HTTPS proxy.
+
+```toml
+listen="0.0.0.0:3128"
+tls_cert_file="/etc/microproxy/proxy.crt"
+tls_key_file="/etc/microproxy/proxy.key"
+```
+
+The certificate is the proxy's own, for the name its clients reach it by. It is
+re-read on `USR2` along with the configuration, so a renewal is picked up
+without a restart, and a pair that can't be read leaves the one in force in
+place. Connections already established keep the certificate they started with.
+
+This does not decrypt anything: what a client sends through `CONNECT` stays
+opaque to the proxy. It protects the hop between the client and the proxy, not
+the traffic inside it.
+
+The SOCKS frontend is unaffected — SOCKS5 has no TLS convention — and so is the
+`/health` endpoint, which stays plain HTTP on `http_listen`.
+
+Note that not every client can be configured to use an HTTPS proxy: browsers
+generally can, through a PAC file or a command-line flag, while system-wide
+proxy settings on some platforms only accept a plain one. Check before turning
+it on for an existing deployment.
+
+In Go, the same thing is `WithListenerTLS`:
+
+```go
+srv, err := microproxy.New(cfg, microproxy.WithListenerTLS(&tls.Config{
+	GetCertificate: myCertSource.GetCertificate,
+}))
+```
+
+`Serve` and `ListenAndServe` then wrap the listener themselves, so do not pass
+an already wrapped one as well. TLS 1.2 is applied as a floor when the
+configuration does not set one.
 
 ### Health
 
