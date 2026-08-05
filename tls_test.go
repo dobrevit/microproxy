@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"errors"
 	"math/big"
 	"net"
 	"net/http"
@@ -84,13 +85,14 @@ func newTLSProxy(t *testing.T, cfg Config, tlsConfig *tls.Config, pool *x509.Cer
 		t.Fatal(err)
 	}
 
+	// Verification stays on, so that the test fails if the proxy ever presents
+	// a certificate other than the one it was given. pool has to carry the
+	// targets' issuers too, since one tls.Config covers both hops.
 	client := &http.Client{Transport: &http.Transport{
 		Proxy: http.ProxyURL(proxyURL),
 		TLSClientConfig: &tls.Config{
 			RootCAs:    pool,
 			MinVersion: tls.VersionTLS12,
-			// the target servers in these tests are self-signed too
-			InsecureSkipVerify: true, //nolint:gosec // the proxy's own certificate is pinned through RootCAs
 		},
 	}}
 
@@ -107,6 +109,10 @@ func TestListenerTLS(t *testing.T) {
 	defer secure.Close()
 
 	certificate, pool := selfSigned(t, "127.0.0.1")
+
+	// the tunnelled target is self-signed too, and one tls.Config covers both
+	// hops, so its issuer joins the proxy's in the same pool
+	pool.AddCert(secure.Certificate())
 
 	_, client := newTLSProxy(t,
 		Config{AllowedConnectPorts: []int{portOf(t, secure.URL)}},
@@ -241,6 +247,33 @@ func TestListenerTLSCopiesTheConfigAndSetsAFloor(t *testing.T) {
 
 	if server.listenerTLS.MinVersion != tls.VersionTLS13 {
 		t.Errorf("expected the configured floor to be kept, got %v", server.listenerTLS.MinVersion)
+	}
+}
+
+// The client in these tests has to be actually verifying the proxy, or they
+// would pass against any certificate at all. A client that does not trust the
+// issuer must fail to get through.
+func TestListenerTLSCertificateIsVerified(t *testing.T) {
+	background := httptest.NewServer(constantHandler("hello"))
+	defer background.Close()
+
+	certificate, _ := selfSigned(t, "127.0.0.1")
+
+	// a pool that trusts something else entirely
+	_, otherPool := selfSigned(t, "127.0.0.1")
+
+	_, client := newTLSProxy(t, Config{},
+		&tls.Config{Certificates: []tls.Certificate{certificate}}, //nolint:gosec // MinVersion is applied by WithListenerTLS
+		otherPool)
+
+	_, err := client.Get(background.URL)
+	if err == nil {
+		t.Fatal("expected the client to refuse a proxy certificate it does not trust")
+	}
+
+	var unknownAuthority x509.UnknownAuthorityError
+	if !errors.As(err, &unknownAuthority) {
+		t.Errorf("expected an unknown-authority error, got %v", err)
 	}
 }
 
