@@ -6,9 +6,10 @@ WORKDIR /app
 
 COPY . /app/
 
-RUN go build . && go test -v ./...
+# test first, so that a failing test stops the image from being built at all
+RUN go test ./... && go build -o microproxy ./cmd/microproxy
 
-FROM alpine:3.22 as final
+FROM alpine:3.23 as final
 
 COPY --from=builder /app/microproxy /usr/local/bin/
 

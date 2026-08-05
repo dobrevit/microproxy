@@ -8,6 +8,19 @@ services:
     image: microproxy:latest
     command: [ "microproxy", "-config", "/usr/local/etc/microproxy.toml", "-i" ]
     ports:
-      - "3128:3128"
+      # Bound to the loopback interface on purpose: microproxy-docker.toml ships
+      # without authentication and accepts every source network, so publishing
+      # these ports on all interfaces would expose an open forward proxy. Add
+      # auth_file/auth_type or tighten allowed_networks before widening them.
+      - "127.0.0.1:3128:3128"
+      # the SOCKS5 frontend
+      - "127.0.0.1:1080:1080"
+      # the /health endpoint
+      - "127.0.0.1:8080:8080"
     volumes:
       - ./microproxy-docker.toml:/usr/local/etc/microproxy.toml
+    healthcheck:
+      test: [ "CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/health" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
