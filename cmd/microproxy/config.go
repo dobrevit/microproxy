@@ -28,6 +28,17 @@ type fileConfig struct {
 	// HTTPListen is where the /health endpoint is served. The proxy itself
 	// does not listen there.
 	HTTPListen string `toml:"http_listen"`
+
+	// TLSCertFile and TLSKeyFile turn the proxy listener into a TLS one, so
+	// that clients speak the proxy protocol inside a TLS connection. They are
+	// the proxy's own certificate, for the name its clients reach it by.
+	TLSCertFile string `toml:"tls_cert_file"`
+	TLSKeyFile  string `toml:"tls_key_file"`
+}
+
+// tlsEnabled reports whether the proxy listener should speak TLS.
+func (c *fileConfig) tlsEnabled() bool {
+	return c.TLSCertFile != "" || c.TLSKeyFile != ""
 }
 
 // loadConfig reads and validates a configuration file. It reports an error
@@ -64,6 +75,10 @@ func (c *fileConfig) validate() error {
 
 	if c.HealthCheckEnabled == "on" && c.HTTPListen == "" {
 		return fmt.Errorf("'enable_health_check' needs 'http_listen' to serve the endpoint on")
+	}
+
+	if c.tlsEnabled() && (c.TLSCertFile == "" || c.TLSKeyFile == "") {
+		return fmt.Errorf("'tls_cert_file' and 'tls_key_file' have to be given together")
 	}
 
 	return c.Config.Validate()

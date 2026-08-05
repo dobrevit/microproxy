@@ -68,8 +68,47 @@ func WithDialer(dialer ContextDialer) Option {
 	}
 }
 
+// WithListenerTLS makes the HTTP frontend accept TLS connections: clients
+// connect to the proxy over TLS and speak the proxy protocol inside it, which
+// is what a browser calls an "HTTPS proxy".
+//
+// This keeps the Proxy-Authorization credentials and the host names of CONNECT
+// requests off the local network, which a plain proxy sends in the clear. It
+// does not decrypt anything a client tunnels: what goes through CONNECT is
+// still opaque to the proxy.
+//
+// The certificate is the proxy's own, for the name its clients reach it by. Use
+// tls.Config.GetCertificate to serve one that can be replaced without a
+// restart. A MinVersion of TLS 1.2 is applied when config does not set one, and
+// config is copied, so later changes to it are not picked up.
+//
+// This is the server side. WithTLSClientConfig is the unrelated client side,
+// used when this proxy talks to an https:// upstream.
+//
+// The SOCKS frontend is unaffected: SOCKS5 has no TLS convention and no client
+// speaks one.
+func WithListenerTLS(config *tls.Config) Option {
+	return func(s *Server) error {
+		if config == nil {
+			s.listenerTLS = nil
+
+			return nil
+		}
+
+		listenerTLS := config.Clone()
+		if listenerTLS.MinVersion == 0 {
+			listenerTLS.MinVersion = tls.VersionTLS12
+		}
+
+		s.listenerTLS = listenerTLS
+
+		return nil
+	}
+}
+
 // WithTLSClientConfig is the TLS configuration used when the proxy itself
-// speaks TLS, which is to an https:// upstream proxy.
+// speaks TLS as a client, which is to an https:// upstream proxy. See
+// WithListenerTLS for the server side.
 func WithTLSClientConfig(config *tls.Config) Option {
 	return func(s *Server) error {
 		s.tlsConfig = config
