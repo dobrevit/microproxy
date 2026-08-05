@@ -193,10 +193,23 @@ only thing limiting them.
 
 ### Health
 
-`enable_health_check="on"` makes the proxy count the responses it serves: a run
-of consecutive failures marks it unhealthy and a single success clears the run.
+`enable_health_check="on"` makes the proxy count how its work goes: a run of
+consecutive failures marks it unhealthy and a single success clears the run.
 `/health` on `http_listen` answers 200 while it is healthy and 503 once it is
 not, which is what the container image's healthcheck probes.
+
+What counts differs slightly between the two frontends:
+
+* the SOCKS frontend reports on whether it reached the target. Opening a tunnel
+  is a success and failing to dial one is a failure; a client refused before the
+  proxy tried to reach anything — wrong password, disallowed network, disallowed
+  port — records nothing, because it says something about that client rather
+  than about this proxy;
+* the HTTP frontend counts every response it serves, and additionally treats a
+  407 as a failure. A `Proxy-Authorization` challenge in the response stream may
+  have come from an upstream proxy whose credentials have gone stale, which is
+  the proxy's problem, but it may equally be this proxy challenging its own
+  client, which is not.
 
 A program embedding the package gets the same thing through the API, and can
 read the state directly rather than over HTTP:
