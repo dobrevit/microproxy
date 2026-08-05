@@ -394,8 +394,11 @@ func (s *Server) socksDial(client net.Conn, target string) (net.Conn, error) {
 		return nil, fmt.Errorf("%w: %v is not an allowed port", errSOCKSRefused, target)
 	}
 
+	// From here the proxy is the one being asked to reach something, so the
+	// outcome is what its health is made of.
 	route, err := s.route(target)
 	if err != nil {
+		s.recordHealthFailure()
 		_ = writeSOCKSReply(client, replyGeneralFailure, nil)
 
 		return nil, fmt.Errorf("couldn't route %v: %w", target, err)
@@ -403,10 +406,13 @@ func (s *Server) socksDial(client net.Conn, target string) (net.Conn, error) {
 
 	upstream, err := s.dialRoute(context.Background(), route, "tcp", target)
 	if err != nil {
+		s.recordHealthFailure()
 		_ = writeSOCKSReply(client, replyForDialError(err), nil)
 
 		return nil, fmt.Errorf("couldn't connect to %v: %w", target, err)
 	}
+
+	s.recordHealthSuccess()
 
 	if err := writeSOCKSReply(client, replySuccess, upstream.LocalAddr()); err != nil {
 		upstream.Close()

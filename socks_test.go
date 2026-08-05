@@ -3,6 +3,7 @@ package microproxy
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -317,5 +318,114 @@ func TestSOCKSShutdown(t *testing.T) {
 	if conn, err := net.DialTimeout("tcp", addr, time.Second); err == nil {
 		conn.Close()
 		t.Error("expected the listener to be closed")
+	}
+}
+
+// unhealthy drives the tracker below its threshold, so that a later success is
+// visible as a change rather than as the state it started in.
+func unhealthy(t *testing.T, health *Health) {
+	t.Helper()
+
+	for i := 0; i < DefaultHealthFailureLimit; i++ {
+		health.RecordFailure()
+	}
+
+	if health.Healthy() {
+		t.Fatal("expected the proxy to be unhealthy to begin with")
+	}
+}
+
+// A tunnel the proxy managed to open says it can reach the world.
+func TestSOCKSRecordsHealthOnSuccess(t *testing.T) {
+	background := httptest.NewServer(constantHandler("Hello, World!"))
+	defer background.Close()
+
+	server, addr := newTestSOCKS(t, Config{
+		AllowedConnectPorts: []int{portOf(t, background.URL)},
+		HealthCheckEnabled:  "on",
+	})
+
+	unhealthy(t, server.Health())
+
+	resp, err := socksClient(t, addr, "", "").Get(background.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if !server.Health().Healthy() {
+		t.Error("expected an established tunnel to record a success")
+	}
+}
+
+// A target the proxy could not reach is what the health endpoint exists to
+// report.
+func TestSOCKSRecordsHealthOnDialFailure(t *testing.T) {
+	background := httptest.NewServer(constantHandler("Hello, World!"))
+	defer background.Close()
+
+	server, addr := newTestSOCKS(t,
+		Config{
+			AllowedConnectPorts: []int{portOf(t, background.URL)},
+			HealthCheckEnabled:  "on",
+		},
+		WithRouter(RouterFunc(func(host string) (Route, error) {
+			return Route{Dialer: DialerFunc(func(context.Context, string, string) (net.Conn, error) {
+				return nil, errors.New("the tunnel is down")
+			})}, nil
+		})))
+
+	if _, err := socksClient(t, addr, "", "").Get(background.URL); err == nil {
+		t.Fatal("expected the connection to fail")
+	}
+
+	if failures := server.Health().Failures(); failures != 1 {
+		t.Errorf("expected one failure to be recorded, got %v", failures)
+	}
+}
+
+// A client refused before the proxy tried to reach anything says nothing about
+// the proxy, so it must not count against it.
+func TestSOCKSRefusalDoesNotAffectHealth(t *testing.T) {
+	background := httptest.NewServer(constantHandler("Hello, World!"))
+	defer background.Close()
+
+	server, addr := newTestSOCKS(t,
+		Config{
+			AllowedConnectPorts: []int{portOf(t, background.URL)},
+			HealthCheckEnabled:  "on",
+		},
+		WithCredentials(testBasicUsers()))
+
+	if _, err := socksClient(t, addr, user, "wrong").Get(background.URL); err == nil {
+		t.Fatal("expected the connection to be refused")
+	}
+
+	if failures := server.Health().Failures(); failures != 0 {
+		t.Errorf("expected a refused client to record nothing, got %v failures", failures)
+	}
+
+	if !server.Health().Healthy() {
+		t.Error("expected the proxy to still be healthy")
+	}
+}
+
+// A client the network ACLs turn away is refused for the same reason.
+func TestSOCKSDeniedNetworkDoesNotAffectHealth(t *testing.T) {
+	background := httptest.NewServer(constantHandler("Hello, World!"))
+	defer background.Close()
+
+	server, addr := newTestSOCKS(t, Config{
+		AllowedNetworks:     []string{"172.16.11.0/24"},
+		AllowedConnectPorts: []int{portOf(t, background.URL)},
+		HealthCheckEnabled:  "on",
+	})
+
+	if _, err := socksClient(t, addr, "", "").Get(background.URL); err == nil {
+		t.Fatal("expected the connection to be refused")
+	}
+
+	if failures := server.Health().Failures(); failures != 0 {
+		t.Errorf("expected a denied client to record nothing, got %v failures", failures)
 	}
 }

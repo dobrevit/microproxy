@@ -98,15 +98,30 @@ func (s *Server) Health() *Health {
 // health check counted, so it is kept: a proxy whose upstream credentials have
 // gone stale answers nothing but 407.
 func (s *Server) recordHealth(resp *http.Response) {
-	if s.health == nil {
-		return
-	}
-
 	if resp == nil || resp.StatusCode == http.StatusProxyAuthRequired {
-		s.health.RecordFailure()
+		s.recordHealthFailure()
 
 		return
 	}
 
-	s.health.RecordSuccess()
+	s.recordHealthSuccess()
+}
+
+// recordHealthSuccess and recordHealthFailure are what the frontends report
+// through. They do nothing unless health tracking was asked for.
+//
+// The SOCKS frontend reports on whether it reached the target, and says nothing
+// about the connections it refuses before trying: a client presenting the wrong
+// password, or coming from a network that is not allowed, is a statement about
+// that client rather than about this proxy's ability to reach the world.
+func (s *Server) recordHealthSuccess() {
+	if s.health != nil {
+		s.health.RecordSuccess()
+	}
+}
+
+func (s *Server) recordHealthFailure() {
+	if s.health != nil {
+		s.health.RecordFailure()
+	}
 }
