@@ -3,6 +3,7 @@ package microproxy
 import (
 	"crypto/md5"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/elazarl/goproxy"
 )
 
 // >>> import hashlib
@@ -487,4 +490,90 @@ func portOf(t *testing.T, rawURL string) int {
 	}
 
 	return port
+}
+
+// The CONNECT handler passes whatever request it was given, and goproxy's
+// NewResponse copies a request's TransferEncoding without checking it for nil.
+// Authenticating a request that is not there has to answer a challenge rather
+// than panic.
+func TestAuthenticateSurvivesANilRequest(t *testing.T) {
+	tests := map[string]Credentials{
+		"basic":  testBasicUsers(),
+		"digest": testDigestUsers(),
+	}
+
+	for name, credentials := range tests {
+		t.Run(name, func(t *testing.T) {
+			server, err := New(Config{}, WithCredentials(credentials))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			ctx := &goproxy.ProxyCtx{Proxy: server.proxy}
+
+			resp := server.authenticate(nil, ctx)
+			if resp == nil {
+				t.Fatal("expected a challenge for an unauthenticated request")
+			}
+
+			if resp.StatusCode != http.StatusProxyAuthRequired {
+				t.Errorf("expected status 407, got %v", resp.StatusCode)
+			}
+
+			if resp.Header.Get("Proxy-Authenticate") == "" {
+				t.Error("expected a Proxy-Authenticate challenge")
+			}
+		})
+	}
+}
+
+// The same request reaches the CONNECT handler, which must not panic on it
+// either.
+func TestHandleConnectSurvivesAContextWithoutARequest(t *testing.T) {
+	server, err := New(Config{}, WithCredentials(testBasicUsers()))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := &goproxy.ProxyCtx{Proxy: server.proxy}
+
+	action, host := server.handleConnect("example.com:443", ctx)
+	if action != goproxy.RejectConnect {
+		t.Error("expected the unauthenticated CONNECT to be rejected")
+	}
+
+	if host != "example.com:443" {
+		t.Errorf("expected the host to be passed through, got %v", host)
+	}
+}
+
+// failingReader stands in for a randomness source that has stopped working.
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) {
+	return 0, errors.New("no randomness available")
+}
+
+// When a nonce can't be issued the proxy answers an error rather than a
+// challenge. That path builds its response with goproxy.NewResponse, which
+// copies the request's TransferEncoding without checking the request for nil,
+// so it is the one place a missing request turns into a panic.
+func TestDigestAuthReportsANonceFailureWithoutARequest(t *testing.T) {
+	server, err := New(Config{}, WithCredentials(testDigestUsers()))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server.nonces.random = failingReader{}
+
+	ctx := &goproxy.ProxyCtx{Proxy: server.proxy}
+
+	resp := server.authenticate(nil, ctx)
+	if resp == nil {
+		t.Fatal("expected a response")
+	}
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("expected status 500, got %v", resp.StatusCode)
+	}
 }

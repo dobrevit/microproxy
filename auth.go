@@ -147,6 +147,11 @@ type nonceStore struct {
 	mu        sync.Mutex
 	nonces    map[string]*nonceInfo
 	lastSweep time.Time
+
+	// random is where nonces are drawn from. It is nil outside the tests,
+	// which is crypto/rand.Reader; on Go 1.24 that one cannot fail, so the
+	// error path is only reachable by substituting a source that does.
+	random io.Reader
 }
 
 func newNonceStore() *nonceStore {
@@ -160,8 +165,13 @@ func newNonceStore() *nonceStore {
 // Sweeping here rather than from a ticker keeps the store free of a goroutine
 // that would have to be shut down with the server.
 func (s *nonceStore) issue() (string, error) {
+	source := s.random
+	if source == nil {
+		source = rand.Reader
+	}
+
 	buf := make([]byte, 16)
-	if _, err := rand.Read(buf); err != nil {
+	if _, err := io.ReadFull(source, buf); err != nil {
 		return "", fmt.Errorf("couldn't generate a nonce: %w", err)
 	}
 
@@ -354,6 +364,15 @@ func (s *Server) authenticate(req *http.Request, ctx *goproxy.ProxyCtx) *http.Re
 		return nil
 	}
 
+	// Standing an empty request in for a missing one keeps every branch below
+	// safe to dereference it: the header parsing reads it, and the responses
+	// are built by goproxy.NewResponse, which copies its TransferEncoding
+	// without checking. goproxy itself always passes one, but this is reached
+	// from the CONNECT handler too, whose request is the caller's to provide.
+	if req == nil {
+		req = &http.Request{}
+	}
+
 	switch {
 	case auth.digest != nil:
 		return s.authenticateDigest(auth, req, ctx)
@@ -365,10 +384,7 @@ func (s *Server) authenticate(req *http.Request, ctx *goproxy.ProxyCtx) *http.Re
 }
 
 func (s *Server) authenticateBasic(auth *authenticator, req *http.Request, ctx *goproxy.ProxyCtx) *http.Response {
-	var data *basicAuthData
-	if req != nil {
-		data = getBasicAuthData(req)
-	}
+	data := getBasicAuthData(req)
 
 	if data == nil || !auth.basic.VerifyBasic(data.user, data.password) {
 		if data != nil {
@@ -384,10 +400,7 @@ func (s *Server) authenticateBasic(auth *authenticator, req *http.Request, ctx *
 }
 
 func (s *Server) authenticateDigest(auth *authenticator, req *http.Request, ctx *goproxy.ProxyCtx) *http.Response {
-	var data *digestAuthData
-	if req != nil {
-		data = getDigestAuthData(req)
-	}
+	data := getDigestAuthData(req)
 
 	if data == nil || !verifyDigest(auth.digest, s.nonces, data) {
 		if data != nil {
@@ -412,7 +425,7 @@ func (s *Server) authenticateDigest(auth *authenticator, req *http.Request, ctx 
 }
 
 func remoteAddr(req *http.Request) string {
-	if req == nil {
+	if req == nil || req.RemoteAddr == "" {
 		return "-"
 	}
 
